@@ -70,6 +70,51 @@ func NewFeedDetailAction(page *rod.Page) *FeedDetailAction {
 	return &FeedDetailAction{page: page}
 }
 
+type feedDetailNavigatePage interface {
+	Navigate(url string) error
+	WaitDOMStable(time.Duration, float64) error
+}
+
+type rodFeedDetailNavigatePage struct {
+	page *rod.Page
+}
+
+func (r rodFeedDetailNavigatePage) Navigate(url string) error {
+	return r.page.Navigate(url)
+}
+
+func (r rodFeedDetailNavigatePage) WaitDOMStable(d time.Duration, diff float64) error {
+	return r.page.WaitDOMStable(d, diff)
+}
+
+type scrollTopReader interface {
+	ReadScrollTop() (int, error)
+}
+
+type rodScrollTopReader struct {
+	page *rod.Page
+}
+
+func (r rodScrollTopReader) ReadScrollTop() (int, error) {
+	result, err := r.page.Eval(`() => {
+		return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+	}`)
+	if err != nil {
+		return 0, err
+	}
+	return result.Value.Int(), nil
+}
+
+func navigateFeedDetailPage(page feedDetailNavigatePage, url string) error {
+	if err := page.Navigate(url); err != nil {
+		return fmt.Errorf("navigate feed detail failed: %w", err)
+	}
+	if err := page.WaitDOMStable(2*time.Second, 0.1); err != nil {
+		return fmt.Errorf("wait feed detail DOM stable failed: %w", err)
+	}
+	return nil
+}
+
 // ========== 主要业务逻辑 ==========
 
 func (f *FeedDetailAction) GetFeedDetail(ctx context.Context, feedID, xsecToken string, loadAllComments bool, config CommentLoadConfig) (*FeedDetailResponse, error) {
@@ -87,9 +132,7 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 	// 使用retry-go处理页面导航和DOM稳定等待
 	err := retry.Do(
 		func() error {
-			page.MustNavigate(url)
-			page.MustWaitDOMStable()
-			return nil
+			return navigateFeedDetailPage(rodFeedDetailNavigatePage{page: page}, url)
 		},
 		retry.Attempts(3),
 		retry.Delay(500*time.Millisecond),
@@ -112,6 +155,10 @@ func (f *FeedDetailAction) GetFeedDetailWithConfig(ctx context.Context, feedID, 
 		if err := f.loadAllCommentsWithConfig(page, config); err != nil {
 			logrus.Warnf("加载全部评论失败: %v", err)
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	return f.extractFeedDetail(page, feedID)
@@ -243,8 +290,7 @@ func (cl *commentLoader) clickButtonsWithRetry() {
 }
 
 func (cl *commentLoader) updateState(currentCount int) {
-	totalCount := getTotalCommentCount(cl.page)
-	logrus.Debugf("当前评论: %d, 目标: %d", currentCount, totalCount)
+	logrus.Debugf("当前评论: %d", currentCount)
 
 	if currentCount != cl.state.lastCount {
 		logrus.Infof("✓ 评论增加: %d -> %d (+%d)",
@@ -582,17 +628,17 @@ func scrollToLastComment(page *rod.Page) {
 
 // ========== DOM 查询 ==========
 
-func getScrollTop(page *rod.Page) int {
+func getScrollTopFromReader(reader scrollTopReader) int {
 	var result int
 
 	// 使用retry-go来处理可能的DOM查询失败
 	err := retry.Do(
 		func() error {
-			evalResult := page.MustEval(`() => {
-				return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
-			}`)
-
-			result = evalResult.Int()
+			value, err := reader.ReadScrollTop()
+			if err != nil {
+				return err
+			}
+			result = value
 			return nil
 		},
 		retry.Attempts(3),
@@ -610,6 +656,12 @@ func getScrollTop(page *rod.Page) int {
 
 	return result
 }
+
+func getScrollTop(page *rod.Page) int {
+	return getScrollTopFromReader(rodScrollTopReader{page: page})
+}
+
+var readTotalCommentCount = getTotalCommentCount
 
 func getCommentCount(page *rod.Page) int {
 	var result int
