@@ -23,8 +23,12 @@ func (u *UserProfileAction) UserProfile(ctx context.Context, userID, xsecToken s
 	page := u.page.Context(ctx)
 
 	searchURL := makeUserProfileURL(userID, xsecToken)
-	page.MustNavigate(searchURL)
-	page.MustWaitStable()
+	if err := page.Navigate(searchURL); err != nil {
+		return nil, fmt.Errorf("navigate user profile failed: %w", err)
+	}
+	if err := page.WaitStable(2 * time.Second); err != nil {
+		return nil, fmt.Errorf("wait user profile stable failed: %w", err)
+	}
 
 	return u.extractUserProfileData(page)
 }
@@ -116,7 +120,9 @@ func (u *UserProfileAction) GetMyProfileViaSidebar(ctx context.Context) (*UserPr
 	}
 
 	// 等待页面加载完成并获取 __INITIAL_STATE__
-	page.MustWaitStable()
+	if err := page.WaitStable(2 * time.Second); err != nil {
+		return nil, fmt.Errorf("wait my profile stable failed: %w", err)
+	}
 
 	return u.extractUserProfileData(page)
 }

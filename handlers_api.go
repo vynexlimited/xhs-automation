@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
@@ -9,6 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 )
+
+const loginStatusRequestTimeout = 25 * time.Second
+const myProfileRequestTimeout = 90 * time.Second
 
 // respondError 返回错误响应
 func respondError(c *gin.Context, statusCode int, code, message string, details any) {
@@ -40,7 +45,10 @@ func respondSuccess(c *gin.Context, data any, message string) {
 
 // checkLoginStatusHandler 检查登录状态
 func (s *AppServer) checkLoginStatusHandler(c *gin.Context) {
-	status, err := s.xiaohongshuService.CheckLoginStatus(c.Request.Context())
+	ctx, cancel := context.WithTimeout(context.Background(), loginStatusRequestTimeout)
+	defer cancel()
+
+	status, err := s.xiaohongshuService.CheckLoginStatus(ctx)
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "STATUS_CHECK_FAILED",
 			"检查登录状态失败", err.Error())
@@ -282,8 +290,11 @@ func healthHandler(c *gin.Context) {
 
 // myProfileHandler 我的信息
 func (s *AppServer) myProfileHandler(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(context.Background(), myProfileRequestTimeout)
+	defer cancel()
+
 	// 获取当前登录用户信息
-	result, err := s.xiaohongshuService.GetMyProfile(c.Request.Context())
+	result, err := s.xiaohongshuService.GetMyProfile(ctx)
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "GET_MY_PROFILE_FAILED",
 			"获取我的主页失败", err.Error())

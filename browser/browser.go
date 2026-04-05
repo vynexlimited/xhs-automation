@@ -1,12 +1,21 @@
 package browser
 
 import (
+	"errors"
 	"net/url"
 	"os"
+	"strings"
 
+	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
 	"github.com/xpzouying/headless_browser"
+	"github.com/xpzouying/xiaohongshu-mcp/configs"
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
+)
+
+const (
+	modeCDP    = "cdp"
+	modeLegacy = "legacy"
 )
 
 type browserConfig struct {
@@ -33,6 +42,36 @@ func maskProxyCredentials(proxyURL string) string {
 		u.User = url.User("***")
 	}
 	return u.String()
+}
+
+func CurrentMode() string {
+	if configs.IsCdpMode() {
+		return modeCDP
+	}
+	return modeLegacy
+}
+
+type cdpConnector func(controlURL string) (*rod.Browser, error)
+
+// ConnectCDPBrowser attaches to an existing Chrome instance over CDP.
+// It does not launch or manage a Chrome process.
+func ConnectCDPBrowser() (*rod.Browser, error) {
+	return connectCDPBrowser(configs.GetCdpURL(), defaultCDPConnector)
+}
+
+func connectCDPBrowser(controlURL string, connector cdpConnector) (*rod.Browser, error) {
+	if strings.TrimSpace(controlURL) == "" {
+		return nil, errors.New("cdp control url is required")
+	}
+	return connector(controlURL)
+}
+
+func defaultCDPConnector(controlURL string) (*rod.Browser, error) {
+	browser := rod.New().ControlURL(controlURL)
+	if err := browser.Connect(); err != nil {
+		return nil, err
+	}
+	return browser, nil
 }
 
 func NewBrowser(headless bool, options ...Option) *headless_browser.Browser {

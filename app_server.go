@@ -66,6 +66,11 @@ func (s *AppServer) Start(port string) error {
 	} else {
 		logrus.Infof("服务器已优雅关闭")
 	}
+	if s.xiaohongshuService != nil && s.xiaohongshuService.pageController != nil {
+		if err := s.xiaohongshuService.pageController.Close(); err != nil {
+			logrus.Warnf("关闭页面控制器失败: %v", err)
+		}
+	}
 
 	return nil
 }
