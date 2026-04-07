@@ -2,6 +2,7 @@ package xiaohongshu
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -9,16 +10,45 @@ import (
 )
 
 const (
-	loginStatusExploreURL = "https://www.xiaohongshu.com/explore"
-	loginStatusSelector   = ".main-container .user .link-wrapper .channel"
-	loginPageSettleDelay  = 3 * time.Second
+	loginStatusExploreURL  = "https://www.xiaohongshu.com/explore"
+	loginStatusSelector    = ".main-container .user .link-wrapper .channel"
+	loginStatusAltSelector = ".main-container .user .link-wrapper"
+	loginPromptSelector    = ".login-container .qrcode-img"
+	loginPageSettleDelay   = 3 * time.Second
 )
+
+type LoginState string
+
+const (
+	LoginStateLoggedIn  LoginState = "logged_in"
+	LoginStateLoggedOut LoginState = "logged_out"
+	LoginStateUnknown   LoginState = "unknown"
+)
+
+type LoginStatusSignals struct {
+	Cookie      bool `json:"cookie"`
+	DOM         bool `json:"dom"`
+	LoginPrompt bool `json:"login_prompt"`
+}
+
+type LoginStatusProbe struct {
+	State      LoginState         `json:"state"`
+	IsLoggedIn bool               `json:"is_logged_in"`
+	Signals    LoginStatusSignals `json:"signals"`
+}
 
 type loginStatusPage interface {
 	Navigate(url string) error
 	WaitLoad() error
 	Has(selector string) (bool, *rod.Element, error)
 }
+
+type loginStatusBrowserPage interface {
+	loginStatusPage
+	Browser() *rod.Browser
+}
+
+type loginStatusSignalDetector func(page loginStatusPage) (LoginStatusSignals, error)
 
 type LoginAction struct {
 	page *rod.Page
@@ -38,25 +68,122 @@ func interpretLoginStatusResult(exists bool, err error) (bool, error) {
 	return true, nil
 }
 
-func checkLoginStatusOnPage(page loginStatusPage, settle func()) (bool, error) {
+func deriveLoginState(signals LoginStatusSignals) LoginState {
+	if signals.Cookie || signals.DOM {
+		return LoginStateLoggedIn
+	}
+	if signals.LoginPrompt {
+		return LoginStateLoggedOut
+	}
+	return LoginStateUnknown
+}
+
+func buildLoginStatusProbe(signals LoginStatusSignals) LoginStatusProbe {
+	state := deriveLoginState(signals)
+	return LoginStatusProbe{
+		State:      state,
+		IsLoggedIn: state == LoginStateLoggedIn,
+		Signals:    signals,
+	}
+}
+
+func hasAnySelector(page loginStatusPage, selectors []string) (bool, error) {
+	for _, selector := range selectors {
+		exists, _, err := page.Has(selector)
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func hasLoginSessionCookie(page loginStatusPage) (bool, error) {
+	browserPage, ok := page.(loginStatusBrowserPage)
+	if !ok {
+		return false, errors.New("browser cookie inspection unsupported")
+	}
+
+	cks, err := browserPage.Browser().GetCookies()
+	if err != nil {
+		return false, err
+	}
+
+	for _, ck := range cks {
+		if ck == nil {
+			continue
+		}
+		domain := strings.ToLower(ck.Domain)
+		if !strings.Contains(domain, "xiaohongshu.com") {
+			continue
+		}
+		switch ck.Name {
+		case "web_session", "id_token", "a1":
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func detectLoginStatusSignals(page loginStatusPage) (LoginStatusSignals, error) {
+	cookie, err := hasLoginSessionCookie(page)
+	if err != nil {
+		return LoginStatusSignals{}, errors.Wrap(err, "inspect login cookies failed")
+	}
+
+	dom, err := hasAnySelector(page, []string{
+		loginStatusSelector,
+		loginStatusAltSelector,
+	})
+	if err != nil {
+		return LoginStatusSignals{}, errors.Wrap(err, "check logged-in markers failed")
+	}
+
+	loginPrompt, err := hasAnySelector(page, []string{
+		loginPromptSelector,
+	})
+	if err != nil {
+		return LoginStatusSignals{}, errors.Wrap(err, "check login prompt markers failed")
+	}
+
+	return LoginStatusSignals{
+		Cookie:      cookie,
+		DOM:         dom,
+		LoginPrompt: loginPrompt,
+	}, nil
+}
+
+func checkLoginStatusOnPage(page loginStatusPage, settle func(), detector loginStatusSignalDetector) (LoginStatusProbe, error) {
 	if err := page.Navigate(loginStatusExploreURL); err != nil {
-		return false, errors.Wrap(err, "navigate explore failed")
+		return LoginStatusProbe{}, errors.Wrap(err, "navigate explore failed")
 	}
-	if err := page.WaitLoad(); err != nil {
-		return false, errors.Wrap(err, "wait explore load failed")
-	}
+	waitLoadErr := page.WaitLoad()
 
 	settle()
 
-	exists, _, err := page.Has(loginStatusSelector)
-	return interpretLoginStatusResult(exists, err)
+	signals, err := detector(page)
+	if err != nil {
+		if waitLoadErr != nil {
+			return LoginStatusProbe{}, errors.Wrap(waitLoadErr, "wait explore load failed")
+		}
+		return LoginStatusProbe{}, errors.Wrap(err, "detect login status signals failed")
+	}
+
+	probe := buildLoginStatusProbe(signals)
+	if waitLoadErr != nil && probe.State == LoginStateUnknown {
+		return LoginStatusProbe{}, errors.Wrap(waitLoadErr, "wait explore load failed")
+	}
+
+	return probe, nil
 }
 
-func (a *LoginAction) CheckLoginStatus(ctx context.Context) (bool, error) {
+func (a *LoginAction) CheckLoginStatus(ctx context.Context) (LoginStatusProbe, error) {
 	pp := a.page.Timeout(25 * time.Second).Context(ctx)
 	return checkLoginStatusOnPage(pp, func() {
 		time.Sleep(1 * time.Second)
-	})
+	}, detectLoginStatusSignals)
 }
 
 func (a *LoginAction) Login(ctx context.Context) error {
@@ -69,7 +196,8 @@ func (a *LoginAction) Login(ctx context.Context) error {
 	time.Sleep(loginPageSettleDelay)
 
 	// 检查是否已经登录
-	if exists, _, _ := pp.Has(loginStatusSelector); exists {
+	probe, err := detectLoginStatusSignals(pp)
+	if err == nil && deriveLoginState(probe) == LoginStateLoggedIn {
 		// 已经登录，直接返回
 		return nil
 	}
@@ -91,7 +219,8 @@ func (a *LoginAction) FetchQrcodeImage(ctx context.Context) (string, bool, error
 	time.Sleep(loginPageSettleDelay)
 
 	// 检查是否已经登录
-	if exists, _, _ := pp.Has(loginStatusSelector); exists {
+	probe, err := detectLoginStatusSignals(pp)
+	if err == nil && deriveLoginState(probe) == LoginStateLoggedIn {
 		return "", true, nil
 	}
 
@@ -117,8 +246,8 @@ func (a *LoginAction) WaitForLogin(ctx context.Context) bool {
 		case <-ctx.Done():
 			return false
 		case <-ticker.C:
-			el, err := pp.Element(loginStatusSelector)
-			if err == nil && el != nil {
+			signals, err := detectLoginStatusSignals(pp)
+			if err == nil && deriveLoginState(signals) == LoginStateLoggedIn {
 				return true
 			}
 		}
