@@ -73,6 +73,7 @@ func getCachedLoginStatus(cookiePath string) (*LoginStatusResponse, bool) {
 			return &LoginStatusResponse{
 				IsLoggedIn: false,
 				Username:   configs.Username,
+				State:      string(xiaohongshu.LoginStateLoggedOut),
 			}, true
 		}
 		return nil, false
@@ -94,8 +95,10 @@ type PublishRequest struct {
 
 // LoginStatusResponse 登录状态响应
 type LoginStatusResponse struct {
-	IsLoggedIn bool   `json:"is_logged_in"`
-	Username   string `json:"username,omitempty"`
+	IsLoggedIn bool                           `json:"is_logged_in"`
+	Username   string                         `json:"username,omitempty"`
+	State      string                         `json:"state,omitempty"`
+	Signals    xiaohongshu.LoginStatusSignals `json:"signals"`
 }
 
 // LoginQrcodeResponse 登录扫码二维码
@@ -161,7 +164,7 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 		return cached, nil
 	}
 
-	lease, err := s.pageController.Acquire(pageRoleWork)
+	lease, err := s.pageController.Acquire(pageRoleLogin)
 	if err != nil {
 		return nil, err
 	}
@@ -170,14 +173,16 @@ func (s *XiaohongshuService) CheckLoginStatus(ctx context.Context) (*LoginStatus
 
 	loginAction := xiaohongshu.NewLogin(lease.Page)
 
-	isLoggedIn, opErr := loginAction.CheckLoginStatus(ctx)
+	probe, opErr := loginAction.CheckLoginStatus(ctx)
 	if opErr != nil {
 		return nil, opErr
 	}
 
 	response := &LoginStatusResponse{
-		IsLoggedIn: isLoggedIn,
+		IsLoggedIn: probe.IsLoggedIn,
 		Username:   configs.Username,
+		State:      string(probe.State),
+		Signals:    probe.Signals,
 	}
 
 	return response, nil

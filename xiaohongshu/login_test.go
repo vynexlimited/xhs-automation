@@ -58,12 +58,21 @@ func TestCheckLoginStatusOnPage_ReturnsLoggedInWhenSelectorExists(t *testing.T) 
 	page := &fakeLoginStatusPage{exists: true}
 	settleCalls := 0
 
-	loggedIn, err := checkLoginStatusOnPage(page, func() { settleCalls++ })
+	probe, err := checkLoginStatusOnPage(page, func() { settleCalls++ }, func(page loginStatusPage) (LoginStatusSignals, error) {
+		exists, _, err := page.Has(loginStatusSelector)
+		if err != nil {
+			return LoginStatusSignals{}, err
+		}
+		return LoginStatusSignals{DOM: exists}, nil
+	})
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	if !loggedIn {
+	if !probe.IsLoggedIn {
 		t.Fatalf("expected loggedIn=true")
+	}
+	if probe.State != LoginStateLoggedIn {
+		t.Fatalf("expected state=%s, got %s", LoginStateLoggedIn, probe.State)
 	}
 	if page.navigatedTo != loginStatusExploreURL {
 		t.Fatalf("expected navigate to %s, got %s", loginStatusExploreURL, page.navigatedTo)
@@ -82,11 +91,13 @@ func TestCheckLoginStatusOnPage_ReturnsLoggedInWhenSelectorExists(t *testing.T) 
 func TestCheckLoginStatusOnPage_WrapsNavigateError(t *testing.T) {
 	page := &fakeLoginStatusPage{navigateErr: errors.New("boom")}
 
-	loggedIn, err := checkLoginStatusOnPage(page, func() {})
+	probe, err := checkLoginStatusOnPage(page, func() {}, func(loginStatusPage) (LoginStatusSignals, error) {
+		return LoginStatusSignals{}, nil
+	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if loggedIn {
+	if probe.IsLoggedIn {
 		t.Fatalf("expected loggedIn=false")
 	}
 	if err.Error() != "navigate explore failed: boom" {
@@ -97,15 +108,103 @@ func TestCheckLoginStatusOnPage_WrapsNavigateError(t *testing.T) {
 func TestCheckLoginStatusOnPage_WrapsWaitLoadError(t *testing.T) {
 	page := &fakeLoginStatusPage{waitLoadErr: errors.New("slow load")}
 
-	loggedIn, err := checkLoginStatusOnPage(page, func() {})
+	probe, err := checkLoginStatusOnPage(page, func() {}, func(loginStatusPage) (LoginStatusSignals, error) {
+		return LoginStatusSignals{}, nil
+	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if loggedIn {
+	if probe.IsLoggedIn {
 		t.Fatalf("expected loggedIn=false")
 	}
 	if err.Error() != "wait explore load failed: slow load" {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckLoginStatusOnPage_UsesSignalsWhenWaitLoadTimesOut(t *testing.T) {
+	page := &fakeLoginStatusPage{waitLoadErr: errors.New("context deadline exceeded")}
+
+	probe, err := checkLoginStatusOnPage(page, func() {}, func(loginStatusPage) (LoginStatusSignals, error) {
+		return LoginStatusSignals{Cookie: true}, nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !probe.IsLoggedIn {
+		t.Fatalf("expected loggedIn=true")
+	}
+	if probe.State != LoginStateLoggedIn {
+		t.Fatalf("expected state=%s, got %s", LoginStateLoggedIn, probe.State)
+	}
+}
+
+func TestDeriveLoginState_PrefersCookieSignal(t *testing.T) {
+	state := deriveLoginState(LoginStatusSignals{
+		Cookie:      true,
+		DOM:         false,
+		LoginPrompt: true,
+	})
+
+	if state != LoginStateLoggedIn {
+		t.Fatalf("expected state=%s, got %s", LoginStateLoggedIn, state)
+	}
+}
+
+func TestDeriveLoginState_UsesLoginPromptForLoggedOut(t *testing.T) {
+	state := deriveLoginState(LoginStatusSignals{
+		Cookie:      false,
+		DOM:         false,
+		LoginPrompt: true,
+	})
+
+	if state != LoginStateLoggedOut {
+		t.Fatalf("expected state=%s, got %s", LoginStateLoggedOut, state)
+	}
+}
+
+func TestDeriveLoginState_ReturnsUnknownWithoutStableSignals(t *testing.T) {
+	state := deriveLoginState(LoginStatusSignals{})
+
+	if state != LoginStateUnknown {
+		t.Fatalf("expected state=%s, got %s", LoginStateUnknown, state)
+	}
+}
+
+func TestCheckLoginStatusOnPage_ReturnsLoggedInWhenCookieSignalExists(t *testing.T) {
+	page := &fakeLoginStatusPage{}
+
+	probe, err := checkLoginStatusOnPage(page, func() {}, func(loginStatusPage) (LoginStatusSignals, error) {
+		return LoginStatusSignals{Cookie: true}, nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !probe.IsLoggedIn {
+		t.Fatalf("expected loggedIn=true")
+	}
+	if probe.State != LoginStateLoggedIn {
+		t.Fatalf("expected state=%s, got %s", LoginStateLoggedIn, probe.State)
+	}
+	if !probe.Signals.Cookie {
+		t.Fatalf("expected cookie signal to be preserved")
+	}
+}
+
+func TestCheckLoginStatusOnPage_ReturnsUnknownWhenSignalsAreInconclusive(t *testing.T) {
+	page := &fakeLoginStatusPage{}
+
+	probe, err := checkLoginStatusOnPage(page, func() {}, func(loginStatusPage) (LoginStatusSignals, error) {
+		return LoginStatusSignals{}, nil
+	})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if probe.IsLoggedIn {
+		t.Fatalf("expected loggedIn=false for unknown state")
+	}
+	if probe.State != LoginStateUnknown {
+		t.Fatalf("expected state=%s, got %s", LoginStateUnknown, probe.State)
 	}
 }
 

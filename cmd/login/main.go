@@ -35,7 +35,7 @@ func main() {
 
 	logrus.Infof("当前登录状态: %v", status)
 
-	if status {
+	if status.IsLoggedIn {
 		return
 	}
 
@@ -55,7 +55,7 @@ func main() {
 		logrus.Fatalf("failed to check login status after login: %v", err)
 	}
 
-	if status {
+	if status.IsLoggedIn {
 		logrus.Info("登录成功！")
 	} else {
 		logrus.Error("登录流程完成但仍未登录")
